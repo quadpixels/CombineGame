@@ -21,9 +21,8 @@ let g_auto_drop = false;
 let g_countdown_ms = 0;
 let g_countdown_ms_prev = -999;
 
-var SERVER_ADDR = "http://104.197.213.64:3000";
-//var SERVER_ADDR = "http://127.0.0.1:3001";
-//var SERVER_ADDR = "http://192.168.8.230:3001";
+//var SERVER_ADDR = "http://104.197.213.64:3000";
+var SERVER_ADDR = "http://127.0.0.1:3000";
 
 function ConnectToServer() {
   g_room_id = undefined;
@@ -95,21 +94,11 @@ function ConnectToServer() {
   });
   
   socket.on("thetas", (thetas) => {
-    console.log("thetas ");
-    console.log(thetas);
-    while (g_thetas.length < thetas.length) g_thetas.push(3.1415/2);
-    while (g_thetas.length > thetas.length) g_thetas.pop();
-    g_thetas = thetas.slice();
-    g_theta_targets = thetas.slice();
-    console.log(g_thetas)
-    console.log(g_theta_targets)
+    g_playercontrol.OnThetasReceived(thetas);
   });
   
   socket.on("theta_one", (theta, rank) => {
-    if (rank < g_thetas.length && rank != this.rank) {
-      g_theta_targets[rank] = theta;
-      while (g_thetas.length > g_theta_targets.length) g_thetas.pop();
-    }
+    g_playercontrol.OnThetaOneReceived(theta, rank);
   });
   
   socket.on("cand", (cand) => {
@@ -181,13 +170,6 @@ function SendSnapshotToRoom() {
     const snapshot = JSON.stringify(g_scene);
     const scores   = JSON.stringify(g_score);
     socket.emit("poscene_snapshot", snapshot, scores);
-  }
-}
-
-function SendMyThetaIfNeeded(value, g_rank) {
-  if (g_last_my_theta != value && !g_is_observer) {
-    socket.emit("theta_one", value, g_rank);
-    g_last_my_theta = value;
   }
 }
 

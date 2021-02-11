@@ -1,6 +1,6 @@
 // 2021-02-01
 //
-// [done] 音符功能
+// [done] 音符主题
 // [done] 加一根红线表示游戏结束的上限
 // ??? 消失时的动画 
 // [done] 球落地会跳起来：原因是摩擦力计算错误，已修复
@@ -63,6 +63,8 @@ let g_theta_update_countdown = THETA_UPDATE_INTERVAL;
 
 let g_scorepanel;
 
+let g_playercontrol;
+
 let g_banner_text = "";
 let g_banner_countdown = 0;
 let g_banner_duration = 0;
@@ -71,12 +73,6 @@ function ShowBanner(txt, ms) {
   g_banner_countdown = ms;
   g_banner_text = txt;
 }
-
-// 侯选区
-let g_thetas = [3.1415/2, 3.1415*0.75]; // 手臂的角度，顺时针旋转
-const THETA_CHANGE_RATE = 3.1415 * 0.76;
-// 所有人的theta的平滑过渡
-let g_theta_targets = [];
 
 let g_skin = 1; // 0：数字，1：音符
 let g_image0, g_atlas;
@@ -188,6 +184,8 @@ function setup() {
   g_gameover_detector.pos.y = PHYS_H/8;
   
   g_scorepanel = new ScorePanel();
+  
+  g_playercontrol = new Controller1();
 }
 
 if (!Array.prototype.remove) {
@@ -263,6 +261,171 @@ function Draw2DTorus(x, y, r0, r1, theta0, theta1) {
   endShape(CLOSE);
 }
 
+// ========= 不同的控制方式 ============
+class Controller {
+  Update(delta_ms) {}
+  EmitStateIfNeeded() {} // 向服务端送自己的状态
+  Render() {}
+  ProcessMouseInput() {}
+}
+
+class Controller1 extends Controller {
+  static THETA_CHANGE_RATE = 3.1415 * 0.76;
+  
+  constructor() {
+    super();
+
+    // 手臂的角度，顺时针旋转
+    this.thetas = [ 3.1415/2, 3.1415/2 ];
+
+    // 所有人的theta的平滑过渡
+    this.theta_targets = [];
+    this.last_my_theta = undefined;
+  }
+  
+  Update(delta_ms) {
+    if (g_flags[0] != 0 && g_rank != undefined) {
+      let t = this.thetas[g_rank] + g_flags[0] * delta_ms / 1000 * 3.14 / 2;
+      if (t < 0) t = 0;
+      if (t > PI) t = PI;
+      this.theta_targets[g_rank] = t;
+    }
+    // 平滑过渡
+    {
+      const EPS = 1e-4;
+      const max_change = Controller1.THETA_CHANGE_RATE * delta_ms / 1000;
+      for (let i=0; i<this.theta_targets.length; i++) {
+        const v0 = this.thetas[i], v1 = this.theta_targets[i];
+        if (this.theta_targets[i] == undefined) continue;
+        let vout = v0;
+        if (abs(v0 - v1) < EPS) {
+          vout = v1;
+        } else {
+          if (v0 > v1) {
+            vout = v0 - max_change;
+            if (vout < v1) vout = v1;
+          } else {
+            vout = v0 + max_change;
+            if (vout > v1) vout = v1;
+          }
+        }
+        this.thetas[i] = vout;
+      }
+    }
+  }
+  
+  // 接收到另一名序数为rank的玩家送来的theta
+  OnThetaOneReceived(theta, rank) {
+    if (rank < this.thetas.length && rank != this.rank) {
+      this.theta_targets[rank] = theta;
+      while (this.thetas.length > this.theta_targets.length) this.thetas.pop();
+    }
+  }
+  
+  // 当有玩家退出时，重置所有的theta
+  OnThetasReceived(thetas) {
+    while (this.thetas.length < thetas.length) this.thetas.push(3.1415/2);
+    while (this.thetas.length > thetas.length) this.thetas.pop();
+    this.thetas = thetas.slice();
+    this.theta_targets = thetas.slice();
+  }
+  
+  EmitStateIfNeeded() {
+    const value = this.thetas[g_rank];
+    if (this.last_my_theta != value && !g_is_observer) {
+      socket.emit("theta_one", value, g_rank);
+      g_last_my_theta = value;
+    }
+  }
+  
+  Render() {
+    push();
+    // 手臂
+    fill("#AAA"); stroke(0);
+    if (this.thetas.length > 0 && g_room_id != undefined) {
+      let pts = [];
+      let p0 = new p5.Vector(PHYS_W/2, 0);
+      pts.push(p0);
+      const L = PHYS_W / 2 / this.thetas.length;
+      for (let i=0; i<this.thetas.length; i++) {
+        const a = this.thetas[i];
+        let delta = new p5.Vector(L*cos(a), L*sin(a));
+        
+        p0 = p0.copy().add(delta);
+        pts.push(p0);
+      }
+      push();
+      for (let i=0; i<pts.length-1; i++) {
+        if (i == g_rank) { stroke("#33F"); } else { stroke("#333"); }
+        line(pts[i].x, pts[i].y, pts[i+1].x, pts[i+1].y); 
+      } 
+      pop();
+      for (let i=0; i<pts.length; i++) { circle(pts[i].x, pts[i].y, 5); }
+      if (g_cand != undefined) {
+        g_cand.pos = p0.copy();
+        g_cand.Render();
+      }
+    }
+    pop();
+  }
+  
+  ProcessMouseInput() {
+    // Dragging the hand segment.
+    if (g_touch_state != undefined   &&
+        g_hovered_block == undefined &&
+        g_game_status == GAME_STATUS_INGAME) {
+      let txt = "Drag: (" + g_last_mouse_pos[0] + "," + g_last_mouse_pos[1] +
+                ")+(" + g_viewport_drag_x + "," + g_viewport_drag_y;
+      push();
+      noStroke();
+      fill(0);
+      textAlign(LEFT, TOP);
+      //text(txt, 0, 0);
+      text(""+g_drag_is_release, 0, 0);
+      
+      const x0 = g_last_mouse_pos[0], y0 = g_last_mouse_pos[1];
+      const x1 = x0 - g_viewport_drag_x, y1 = y0 - g_viewport_drag_y;
+      const R0 = 100, R1 = 200;
+      noStroke();
+      fill("rgba(32,192,255,0.3)");
+      //arc(x0, y0, 2*R, 2*R, g_theta_min, g_theta_max, PIE);
+      Draw2DTorus(x0, y0, R0, R1, g_theta_min, g_theta_max);
+      noFill();
+      
+      let drag_dir = new p5.Vector(-g_viewport_drag_x, -g_viewport_drag_y);
+      let drag_heading = drag_dir.heading();
+      if (drag_heading < 0) drag_heading += 2*PI;
+      const drag_mag = drag_dir.mag();
+      const R2 = 100, R3 = 200, theta2 = (1.5 - 0.1) * PI, theta3 = (1.5+0.1)*PI;
+      if (drag_mag > R2 && drag_mag < R3 && drag_heading > theta2 && drag_heading < theta3) {
+        g_drag_is_release = true;
+      } else g_drag_is_release = false;
+      
+      if (g_drag_is_release)
+        fill("rgba(32,255,32,1)");
+      else
+        fill("rgba(32,255,32,0.3)");
+      Draw2DTorus(x0, y0, R2, R3, theta2, theta3);
+      
+      stroke("rgba(32,192,255,1)");
+      
+      // 下半圈：控制角度
+      if (drag_mag >= R0 && drag_mag <= R1 &&
+        drag_heading >= g_theta_min && drag_heading <= g_theta_max) {
+        g_theta_targets[g_rank] = drag_heading;
+      } else {
+        g_theta_targets[g_rank] = undefined; // 移出区域则立刻停止移动
+      }
+      
+      line(x0, y0, x1, y1);
+      
+      pop();
+    }
+  }
+}
+
+// ========= 画图循环 =================
+
 let g_last_millis = 0;
 function draw() {
   const ms = millis();
@@ -283,42 +446,14 @@ function draw() {
 
   background(220);
   
-  // Update UI event
-  if (g_flags[0] != 0 && g_rank != undefined) {
-    let t = g_thetas[g_rank] + g_flags[0] * delta_ms / 1000 * 3.14 / 2;
-    if (t < 0) t = 0;
-    if (t > PI) t = PI;
-    g_thetas[g_rank] = t;
-  }
-  
-  // 平滑过渡
-  {
-    const EPS = 1e-4;
-    const max_change = THETA_CHANGE_RATE * delta_ms / 1000;
-    for (let i=0; i<g_theta_targets.length; i++) {
-      const v0 = g_thetas[i], v1 = g_theta_targets[i];
-      if (g_theta_targets[i] == undefined) continue;
-      let vout = v0;
-      if (abs(v0 - v1) < EPS) {
-        vout = v1;
-      } else {
-        if (v0 > v1) {
-          vout = v0 - max_change;
-          if (vout < v1) vout = v1;
-        } else {
-          vout = v0 + max_change;
-          if (vout > v1) vout = v1;
-        }
-      }
-      g_thetas[i] = vout;
-    }
-  }
+  // 玩家控制单元
+  g_playercontrol.Update(delta_ms);
 
   // 倒计时掉落
   g_theta_update_countdown -= delta_ms;
   if (g_theta_update_countdown < 0) {
     g_theta_update_countdown = THETA_UPDATE_INTERVAL;
-    SendMyThetaIfNeeded(g_thetas[g_rank], g_rank);
+    g_playercontrol.EmitStateIfNeeded();
   }
 
   g_viewport.Save();
@@ -352,32 +487,8 @@ function draw() {
       }
     }
     
-    // 手臂
-    fill("#AAA"); stroke(0);
-    if (g_thetas.length > 0 && g_room_id != undefined) {
-      let pts = [];
-      let p0 = new p5.Vector(PHYS_W/2, 0);
-      pts.push(p0);
-      const L = PHYS_W / 2 / g_thetas.length;
-      for (let i=0; i<g_thetas.length; i++) {
-        const a = g_thetas[i];
-        let delta = new p5.Vector(L*cos(a), L*sin(a));
-        
-        p0 = p0.copy().add(delta);
-        pts.push(p0);
-      }
-      push();
-      for (let i=0; i<pts.length-1; i++) {
-        if (i == g_rank) { stroke("#33F"); } else { stroke("#333"); }
-        line(pts[i].x, pts[i].y, pts[i+1].x, pts[i+1].y); 
-      } 
-      pop();
-      for (let i=0; i<pts.length; i++) { circle(pts[i].x, pts[i].y, 5); }
-      if (g_cand != undefined) {
-        g_cand.pos = p0.copy();
-        g_cand.Render();
-      }
-    }
+    g_playercontrol.Render();
+    
     pop();
   }
 
@@ -397,58 +508,6 @@ function draw() {
       fill("#888");
     }
     text(txt, width/2, 40);
-    pop();
-  }
-  
-  // Dragging the hand segment.
-  if (g_touch_state != undefined   &&
-      g_hovered_block == undefined &&
-      g_game_status == GAME_STATUS_INGAME) {
-    let txt = "Drag: (" + g_last_mouse_pos[0] + "," + g_last_mouse_pos[1] +
-              ")+(" + g_viewport_drag_x + "," + g_viewport_drag_y;
-    push();
-    noStroke();
-    fill(0);
-    textAlign(LEFT, TOP);
-    //text(txt, 0, 0);
-    text(""+g_drag_is_release, 0, 0);
-    
-    const x0 = g_last_mouse_pos[0], y0 = g_last_mouse_pos[1];
-    const x1 = x0 - g_viewport_drag_x, y1 = y0 - g_viewport_drag_y;
-    const R0 = 100, R1 = 200;
-    noStroke();
-    fill("rgba(32,192,255,0.3)");
-    //arc(x0, y0, 2*R, 2*R, g_theta_min, g_theta_max, PIE);
-    Draw2DTorus(x0, y0, R0, R1, g_theta_min, g_theta_max);
-    noFill();
-    
-    let drag_dir = new p5.Vector(-g_viewport_drag_x, -g_viewport_drag_y);
-    let drag_heading = drag_dir.heading();
-    if (drag_heading < 0) drag_heading += 2*PI;
-    const drag_mag = drag_dir.mag();
-    const R2 = 100, R3 = 200, theta2 = (1.5 - 0.1) * PI, theta3 = (1.5+0.1)*PI;
-    if (drag_mag > R2 && drag_mag < R3 && drag_heading > theta2 && drag_heading < theta3) {
-      g_drag_is_release = true;
-    } else g_drag_is_release = false;
-    
-    if (g_drag_is_release)
-      fill("rgba(32,255,32,1)");
-    else
-      fill("rgba(32,255,32,0.3)");
-    Draw2DTorus(x0, y0, R2, R3, theta2, theta3);
-    
-    stroke("rgba(32,192,255,1)");
-    
-    // 下半圈：控制角度
-    if (drag_mag >= R0 && drag_mag <= R1 &&
-      drag_heading >= g_theta_min && drag_heading <= g_theta_max) {
-      g_theta_targets[g_rank] = drag_heading;
-    } else {
-      g_theta_targets[g_rank] = undefined; // 移出区域则立刻停止移动
-    }
-    
-    line(x0, y0, x1, y1);
-    
     pop();
   }
   
@@ -500,17 +559,6 @@ function draw() {
     text("操作方式：\n键盘 [A] [D] 控制方向； [空格] 放下音符\n触屏：在任何地方上滑或下滑",
       8, 640);
     pop();
-  }
-}
-
-function keyPressed() {
-  if (key == 's') {
-    if (socket == undefined) {
-      ConnectToServer();
-    }
-  }
-  else if (key == 'a') {
-    socket.emit('key', 'a');
   }
 }
 
@@ -644,7 +692,7 @@ function OnTurnChanged() {
     let n = g_rank - g_curr_turn;
     if (n < 0) n += g_num_players;
     if (n == 0) { 
-      txt = "轮到你扔下音符了";
+      txt = "轮到你了";
       if (g_num_players > 1) ShowBanner(txt, 1000);
     }
     else if (n == 1) { txt = "下一轮就该你了"; }
